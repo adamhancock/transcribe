@@ -9,7 +9,7 @@ A TypeScript CLI tool for transcribing and summarizing MP4 recordings using loca
 - OpenAI Whisper (`pip install openai-whisper`) - runs locally for transcription
 - **Ollama** - `ollama serve` (port 11434) for summarization
   - Install: `curl -fsSL https://ollama.com/install.sh | sh`
-  - Pull model: `ollama pull gemma3`
+  - Models are automatically pulled if not available locally
 
 ## How it works
 

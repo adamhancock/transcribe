@@ -4,6 +4,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import axios from 'axios';
 import { $ } from 'zx';
+import chalk from 'chalk';
 
 $.verbose = false;
 
@@ -127,6 +128,63 @@ export async function summarizeTranscript(
 }
 
 
+async function checkOllamaModel(host: string, model: string): Promise<boolean> {
+  try {
+    const response = await axios.get(`${host}/api/tags`);
+    const models = response.data.models || [];
+    return models.some((m: any) => m.name === model || m.name === `${model}:latest`);
+  } catch (error) {
+    return false;
+  }
+}
+
+async function pullOllamaModel(host: string, model: string): Promise<void> {
+  console.log(chalk.yellow(`Model '${model}' not found. Pulling from Ollama registry...`));
+  console.log(chalk.gray('This may take a few minutes depending on the model size.'));
+  
+  try {
+    // Use streaming to show progress
+    const response = await axios.post(`${host}/api/pull`, {
+      name: model,
+      stream: true
+    }, {
+      responseType: 'stream'
+    });
+    
+    let lastStatus = '';
+    response.data.on('data', (chunk: Buffer) => {
+      const lines = chunk.toString().split('\n').filter(line => line.trim());
+      for (const line of lines) {
+        try {
+          const data = JSON.parse(line);
+          if (data.status && data.status !== lastStatus) {
+            lastStatus = data.status;
+            process.stdout.write(`\r${chalk.gray(data.status)}`);
+            if (data.completed && data.total) {
+              const percent = Math.round((data.completed / data.total) * 100);
+              process.stdout.write(` ${percent}%`);
+            }
+          }
+        } catch (e) {
+          // Ignore JSON parse errors
+        }
+      }
+    });
+    
+    await new Promise((resolve, reject) => {
+      response.data.on('end', resolve);
+      response.data.on('error', reject);
+    });
+    
+    console.log('\n' + chalk.green(`Successfully pulled model '${model}'`));
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      throw new Error(`Failed to pull model '${model}': ${error.response?.data?.error || error.message}`);
+    }
+    throw error;
+  }
+}
+
 async function summarizeWithOllama(
   transcript: string,
   host: string,
@@ -134,6 +192,12 @@ async function summarizeWithOllama(
   frames?: string[]
 ): Promise<string> {
   try {
+    // Check if model exists
+    const modelExists = await checkOllamaModel(host, model);
+    if (!modelExists) {
+      await pullOllamaModel(host, model);
+    }
+    
     let prompt = `You are a helpful assistant that creates concise summaries of transcripts. Focus on the key points, main topics discussed, and any important conclusions or action items.\n\nPlease provide a comprehensive summary of the following transcript:\n\n${transcript}`;
     
     // If frames are provided, use the chat API with multimodal support
