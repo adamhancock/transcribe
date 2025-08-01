@@ -1,15 +1,17 @@
 # Transcribe CLI
 
-A powerful TypeScript CLI tool for transcribing and summarizing MP4 recordings using local models with synchronized audio and visual analysis.
+A powerful TypeScript CLI tool for transcribing and summarizing MP4 recordings or VTT subtitle files using local models with synchronized audio and visual analysis.
 
 ## Key Features
 
 - 🎙️ **Timestamped Transcription**: Full audio transcription with precise timestamps using Whisper
+- 📝 **VTT File Support**: Direct summarization of WebVTT subtitle files without transcription
+- 🎬 **Flexible Input**: Accepts MP4 videos, VTT subtitles, or both for combined analysis
 - 🧠 **Intelligent Frame Selection**: AI analyzes transcript to extract frames at meaningful moments with reasoning
 - 🖼️ **Context-Aware Frame Analysis**: Each frame is analyzed with awareness of previous frames
 - 🔄 **Synchronized Analysis**: Matches frame descriptions with relevant transcript segments
-- 📊 **Structured Summaries**: Generates detailed summaries with sections for overview, topics, insights, and action items
-- 🎯 **Smart Model Selection**: Uses llava for visual analysis and gemma3 for text summarization
+- 📊 **Map-Reduce Summarization**: Uses map-reduce strategy for detailed, comprehensive summaries
+- 🎯 **Smart Model Selection**: Uses llava for visual analysis and llama3.2 for text summarization
 - ⚡ **Optimized Processing**: Parallel audio/frame extraction, sequential frame analysis for context
 
 ## Prerequisites
@@ -31,23 +33,28 @@ A powerful TypeScript CLI tool for transcribing and summarizing MP4 recordings u
   - Runs automatically as a background service (port 11434)
   - Default models (automatically pulled on first use):
     - `llava` - for visual frame analysis (multimodal)
-    - `gemma3` - for text summarization
+    - `llama3.2` - for text summarization (map-reduce strategy)
 
 ## How it works
 
-1. **Audio Extraction & Transcription**: 
+1. **Flexible Input Processing**:
+   - **MP4 Files**: Extracts audio, transcribes with Whisper, analyzes video frames
+   - **VTT Files**: Parses WebVTT subtitles directly for immediate summarization
+   - **Combined**: Use VTT for transcript + MP4 for visual frame analysis
+
+2. **Audio Extraction & Transcription** (for MP4): 
    - Extracts audio and transcribes with Whisper
    - Produces timestamped segments (e.g., `[1:30] Speaker says...`)
    - Captures precise timing for synchronization with frames
 
-2. **Intelligent Frame Selection**: 
+3. **Intelligent Frame Selection** (when video available): 
    - AI analyzes transcript content to identify key moments
    - Selects frames at meaningful timestamps with reasoning
    - Shows why each moment was selected (e.g., "Introduction", "Key demonstration")
    - Validates timestamps against actual video duration
    - Falls back to content-based distribution if AI fails
 
-3. **Context-Aware Frame Analysis**: 
+4. **Context-Aware Frame Analysis**: 
    - Uses `llava` model for multimodal visual understanding
    - Analyzes frames sequentially to maintain narrative flow
    - Each frame analysis includes:
@@ -55,20 +62,31 @@ A powerful TypeScript CLI tool for transcribing and summarizing MP4 recordings u
      - Context from previous frame
      - Relevant transcript excerpt from that moment
    
-4. **Comprehensive Summarization**: 
-   - Uses `gemma3` model for structured text generation
-   - Creates detailed summaries including:
-     - **Overview**: Brief introduction to the content
-     - **Main Topics**: Key subjects covered in order
-     - **Key Insights**: Important takeaways and conclusions
-     - **Visual Elements**: Notable visual content from frames
-     - **Action Items**: Any next steps or recommendations
+5. **Map-Reduce Summarization**: 
+   - **Map Phase**: Breaks transcript into chunks, extracts all details from each
+   - **Reduce Phase**: Synthesizes comprehensive summary with multiple sections
+   - Creates extremely detailed summaries including:
+     - **Meeting Overview**: Purpose, participants, context
+     - **Topic Breakdown**: Detailed analysis of each topic discussed
+     - **All Decisions**: Every decision made with context
+     - **Action Items**: Who, what, when for each task
+     - **Tools & Systems**: All platforms and tools mentioned
+     - **Technical Details**: Specifications and configurations
+     - **Problems & Solutions**: Issues raised and resolutions
+     - **Next Steps**: Future plans and follow-ups
 
 ## Installation
 
 ### Using npx (no installation required)
 ```bash
+# Transcribe MP4 video
 npx @adamhancock/transcribe-cli video.mp4
+
+# Summarize VTT subtitle file
+npx @adamhancock/transcribe-cli subtitles.vtt
+
+# Combine VTT transcript with MP4 video analysis
+npx @adamhancock/transcribe-cli subtitles.vtt video.mp4
 ```
 
 ### Global installation
@@ -89,7 +107,14 @@ npm link  # Makes 'transcribe' command available globally
 
 Basic usage:
 ```bash
+# Transcribe and summarize MP4 video
 transcribe video.mp4
+
+# Summarize VTT subtitle file
+transcribe meeting.vtt
+
+# Combine VTT transcript with MP4 video for frame analysis
+transcribe meeting.vtt video.mp4
 ```
 
 Options:
@@ -110,8 +135,14 @@ Options:
 ## Examples
 
 ```bash
-# Basic transcription with intelligent frame analysis
+# Basic MP4 transcription with intelligent frame analysis
 transcribe recording.mp4
+
+# Summarize a VTT subtitle file
+transcribe meeting.vtt
+
+# Combine VTT subtitles with video for visual analysis
+transcribe meeting.vtt recording.mp4
 
 # Quick transcription without analysis
 transcribe recording.mp4 --transcribe-only
@@ -131,14 +162,14 @@ transcribe recording.mp4 --keep-audio --keep-frames --save-timestamps
 # Get plain transcript without timestamps
 transcribe recording.mp4 --plain-transcript
 
-# Use different models
-transcribe recording.mp4 --model llama3.2  # Uses llama3.2 for both vision and text
+# Use different models for better summaries
+transcribe meeting.vtt --model llama3.1  # More powerful model
 
-# Process without frame analysis (audio only)
+# Process MP4 without frame analysis (audio only)
 transcribe recording.mp4 --no-analyze-frames
 
 # Custom output location
-transcribe recording.mp4 -o ~/Documents/meeting-notes.txt
+transcribe meeting.vtt -o ~/Documents/meeting-summary.txt
 ```
 
 ## Performance Tips

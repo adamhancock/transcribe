@@ -2,7 +2,7 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
-import { extractAudio, extractFrames, extractFramesAtTimestamps, transcribeAudio, summarizeTranscript, summarizeFrame, getRelevantTranscriptForFrame, identifyKeyMoments } from './lib/processor.js';
+import { extractAudio, extractFrames, extractFramesAtTimestamps, transcribeAudio, summarizeTranscript, summarizeFrame, getRelevantTranscriptForFrame, identifyKeyMoments, parseVTT } from './lib/processor.js';
 import type { FrameInfo, TimestampedTranscript, KeyMoment } from './lib/processor.js';
 import fs from 'fs/promises';
 import { $ } from 'zx';
@@ -21,14 +21,14 @@ const program = new Command();
 
 program
   .name('transcribe')
-  .description('Transcribe and summarize MP4 recordings using local models')
+  .description('Transcribe and summarize MP4 recordings or VTT subtitles using local models')
   .version('1.0.0')
-  .argument('<input>', 'Path to MP4 file')
+  .argument('<files...>', 'Path to MP4 and/or VTT file(s)')
   .option('-o, --output <path>', 'Output file path (default: input_transcript.txt)')
   .option('-a, --audio-only', 'Only extract audio without transcription')
   .option('-t, --transcribe-only', 'Only transcribe without summarization')
   .option('--host <host>', 'Ollama API host', 'http://localhost:11434')
-  .option('--model <model>', 'Ollama model name for summarization', 'llava')
+  .option('--model <model>', 'Ollama model name for summarization', 'llama3.2')
   .option('--whisper-model <model>', 'Whisper model size', 'base')
   .option('--keep-audio', 'Keep extracted audio file after processing')
   .option('--no-analyze-frames', 'Disable frame extraction and analysis')
@@ -37,35 +37,83 @@ program
   .option('--keep-frames', 'Keep extracted frames after processing')
   .option('--save-timestamps', 'Save timestamped transcript segments to separate file')
   .option('--plain-transcript', 'Save transcript without timestamps in output file')
-  .action(async (input, options) => {
+  .action(async (files, options) => {
     const spinner = ora('Processing...').start();
     
     try {
-      // Check if input file exists
-      await fs.access(input);
+      // Separate files by type
+      let vttFile: string | undefined;
+      let mp4File: string | undefined;
       
-      // Start audio extraction
-      spinner.text = 'Extracting audio from MP4...';
-      const audioPath = await extractAudio(input);
-      spinner.succeed('Audio extraction completed');
-      
-      if (options.audioOnly) {
-        console.log(chalk.green(`Audio saved to: ${audioPath}`));
-        return;
+      for (const file of files) {
+        await fs.access(file);
+        
+        if (file.toLowerCase().endsWith('.vtt')) {
+          if (vttFile) {
+            throw new Error('Multiple VTT files provided. Please provide only one VTT file.');
+          }
+          vttFile = file;
+        } else if (file.toLowerCase().endsWith('.mp4')) {
+          if (mp4File) {
+            throw new Error('Multiple MP4 files provided. Please provide only one MP4 file.');
+          }
+          mp4File = file;
+        } else {
+          throw new Error(`Unsupported file type: ${file}. Must be .mp4 or .vtt`);
+        }
       }
       
-      // Transcribe audio
-      spinner.start('Transcribing audio...');
-      const timestampedTranscript = await transcribeAudio(audioPath, options.whisperModel);
-      spinner.succeed('Audio transcription completed');
+      if (!vttFile && !mp4File) {
+        throw new Error('No valid input files provided. Please provide at least one .mp4 or .vtt file.');
+      }
+      
+      let timestampedTranscript: TimestampedTranscript;
+      let audioPath: string | undefined;
+      let videoPath: string | undefined;
+      let primaryInput: string;
+      
+      if (vttFile) {
+        // VTT file provided - use it for transcript
+        primaryInput = vttFile;
+        spinner.text = 'Parsing VTT file...';
+        timestampedTranscript = await parseVTT(vttFile);
+        spinner.succeed('VTT parsing completed');
+        
+        // Check if MP4 was also provided for frame analysis
+        if (mp4File) {
+          videoPath = mp4File;
+          console.log(chalk.cyan('Video file provided for frame analysis'));
+        }
+      } else if (mp4File) {
+        // Only MP4 provided - extract audio and transcribe
+        primaryInput = mp4File;
+        videoPath = mp4File;
+        
+        // Start audio extraction
+        spinner.text = 'Extracting audio from MP4...';
+        audioPath = await extractAudio(mp4File);
+        spinner.succeed('Audio extraction completed');
+        
+        if (options.audioOnly) {
+          console.log(chalk.green(`Audio saved to: ${audioPath}`));
+          return;
+        }
+        
+        // Transcribe audio
+        spinner.start('Transcribing audio...');
+        timestampedTranscript = await transcribeAudio(audioPath, options.whisperModel);
+        spinner.succeed('Audio transcription completed');
+      } else {
+        throw new Error('No valid input files provided.');
+      }
       
       // Extract and analyze frames if not disabled
       let frameSummaries: string[] = [];
       let frameInfos: FrameInfo[] = [];
       
-      if (options.analyzeFrames !== false && !options.transcribeOnly) {
+      if (options.analyzeFrames !== false && !options.transcribeOnly && videoPath) {
         // Get video duration first
-        const durationResult = await $`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ${input}`;
+        const durationResult = await $`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ${videoPath}`;
         const videoDuration = parseFloat(durationResult.stdout.trim());
         
         // Identify key moments from transcript
@@ -81,14 +129,14 @@ program
           spinner.succeed(`Identified ${keyMoments.length} key moments for frame extraction`);
           
           // Extract frames at key moments
-          frameInfos = await extractFramesAtTimestamps(input, keyMoments);
+          frameInfos = await extractFramesAtTimestamps(videoPath, keyMoments);
           console.log(chalk.green(`✓ Extracted ${frameInfos.length} frames at key moments`));
         } catch (error) {
           // Fall back to fixed interval extraction
           console.error(chalk.yellow('Intelligent frame extraction failed, using fixed intervals'));
           spinner.start('Extracting frames at fixed intervals...');
           frameInfos = await extractFrames(
-            input,
+            videoPath,
             parseInt(options.frameInterval),
             parseInt(options.maxFrames)
           );
@@ -146,7 +194,7 @@ program
             .map(segment => `[${formatTimestamp(segment.start)}] ${segment.text}`)
             .join('\n');
       
-      let finalOutput = `Transcript of ${input}:\n\n${transcriptText}`;
+      let finalOutput = `Transcript of ${primaryInput}:\n\n${transcriptText}`;
       
       if (!options.transcribeOnly) {
         // Summarize with Ollama
@@ -169,15 +217,16 @@ program
       }
       
       // Save output
-      const outputPath = options.output || input.replace(/\.[^/.]+$/, '_transcript.txt');
+      const outputPath = options.output || primaryInput.replace(/\.[^/.]+$/, '_transcript.txt');
       await fs.writeFile(outputPath, finalOutput, 'utf-8');
       console.log(chalk.green(`\nOutput saved to: ${outputPath}`));
       
       // Save timestamped segments if requested
       if (options.saveTimestamps) {
-        const timestampPath = input.replace(/\.[^/.]+$/, '_timestamped.json');
+        const timestampPath = primaryInput.replace(/\.[^/.]+$/, '_timestamped.json');
         const timestampData = {
-          video: input,
+          primaryInput: primaryInput,
+          videoInput: videoPath,
           transcript: timestampedTranscript,
           frameSummaries: frameSummaries.map((summary, index) => ({
             frameNumber: index + 1,
@@ -190,13 +239,13 @@ program
       }
       
       // Clean up audio file if not keeping it
-      if (!options.keepAudio) {
+      if (!options.keepAudio && audioPath) {
         await fs.unlink(audioPath);
       }
       
       // Clean up frames if not keeping them
-      if (frameInfos.length > 0 && !options.keepFrames) {
-        const frameDir = input.replace(/\.[^/.]+$/, '_frames');
+      if (frameInfos.length > 0 && !options.keepFrames && videoPath) {
+        const frameDir = videoPath.replace(/\.[^/.]+$/, '_frames');
         await fs.rm(frameDir, { recursive: true, force: true });
       }
       

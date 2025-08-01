@@ -300,6 +300,12 @@ export interface KeyMoment {
   reason: string;
 }
 
+export interface VTTCue {
+  start: number;
+  end: number;
+  text: string;
+}
+
 export async function identifyKeyMoments(
   segments: TranscriptSegment[],
   maxFrames: number = 30,
@@ -559,6 +565,233 @@ async function pullOllamaModel(host: string, model: string): Promise<void> {
   }
 }
 
+export async function parseVTT(vttPath: string): Promise<TimestampedTranscript> {
+  const vttContent = await fs.readFile(vttPath, 'utf-8');
+  
+  // Parse VTT format
+  const cues: VTTCue[] = [];
+  
+  // Split by double newlines to get cue blocks
+  const blocks = vttContent.split(/\n\s*\n/).filter(block => block.trim());
+  
+  for (const block of blocks) {
+    // Skip WEBVTT header and other metadata
+    if (block.startsWith('WEBVTT') || block.startsWith('NOTE')) {
+      continue;
+    }
+    
+    const lines = block.trim().split('\n');
+    if (lines.length < 2) continue;
+    
+    // Parse timestamp line (e.g., "00:00:00.000 --> 00:00:05.000")
+    const timestampLine = lines.find(line => line.includes('-->'));
+    if (!timestampLine) continue;
+    
+    const timestampMatch = timestampLine.match(/(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})/);
+    if (!timestampMatch) continue;
+    
+    const startTime = parseVTTTimestamp(timestampMatch[1]);
+    const endTime = parseVTTTimestamp(timestampMatch[2]);
+    
+    // Get text (all lines after timestamp)
+    const textStartIndex = lines.indexOf(timestampLine) + 1;
+    const text = lines.slice(textStartIndex).join(' ').trim();
+    
+    if (text) {
+      cues.push({ start: startTime, end: endTime, text });
+    }
+  }
+  
+  // Convert to TranscriptSegment format
+  const segments: TranscriptSegment[] = cues.map(cue => ({
+    text: cue.text,
+    start: cue.start,
+    end: cue.end
+  }));
+  
+  // Create full text
+  const fullText = segments.map(s => s.text).join(' ');
+  
+  return {
+    fullText,
+    segments
+  };
+}
+
+function parseVTTTimestamp(timestamp: string): number {
+  // Convert VTT timestamp (HH:MM:SS.mmm) to seconds
+  const parts = timestamp.replace(',', '.').split(':');
+  const hours = parseInt(parts[0], 10);
+  const minutes = parseInt(parts[1], 10);
+  const seconds = parseFloat(parts[2]);
+  
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+// Map phase: Extract detailed information from each chunk
+async function mapChunk(
+  chunk: string,
+  chunkNumber: number,
+  totalChunks: number,
+  host: string,
+  model: string
+): Promise<string> {
+  const prompt = `You are performing the MAP phase of a map-reduce operation on meeting transcript chunk ${chunkNumber} of ${totalChunks}.
+
+Your task is to extract and structure ALL information from this chunk. Be extremely thorough.
+
+Format your response as follows:
+
+TOPICS:
+- [List each distinct topic discussed]
+
+SPEAKERS & STATEMENTS:
+- [Speaker name if mentioned]: [What they said/discussed]
+
+DECISIONS:
+- [List any decisions made with full context]
+
+ACTION ITEMS:
+- [What needs to be done] | [Who is responsible] | [Deadline if mentioned]
+
+TOOLS/SYSTEMS MENTIONED:
+- [Tool/System name]: [Context of how it was discussed]
+
+TECHNICAL DETAILS:
+- [List all technical specifications, configurations, or implementation details]
+
+PROBLEMS/ISSUES:
+- [Problem]: [Context and any proposed solutions]
+
+METRICS/NUMBERS:
+- [Any quantitative information, deadlines, timeframes]
+
+KEY QUOTES:
+- "[Important verbatim quotes that capture key points]"
+
+CONTEXT CLUES:
+- [Any information that helps understand the broader context]
+
+Transcript chunk:
+${chunk}
+
+Extracted information:`;
+
+  const response = await axios.post(`${host}/api/generate`, {
+    model: model,
+    prompt: prompt,
+    stream: false,
+    options: {
+      temperature: 0.1,
+      num_predict: 3000
+    }
+  });
+
+  return response.data.response;
+}
+
+// Reduce phase: Combine and synthesize all mapped information
+async function reduceChunks(
+  mappedChunks: string[],
+  transcript: string,
+  host: string,
+  model: string,
+  frameSummaries?: string[]
+): Promise<string> {
+  const prompt = `You are performing the REDUCE phase of a map-reduce operation to create a comprehensive meeting summary.
+
+You have been provided with detailed extractions from ${mappedChunks.length} chunks of a meeting transcript. Your task is to synthesize ALL this information into a single, extremely detailed summary that captures EVERYTHING important.
+
+${frameSummaries && frameSummaries.length > 0 ? `
+Additionally, here are visual frame analyses from the video:
+${frameSummaries.join('\n\n')}
+` : ''}
+
+Here are the extracted details from each chunk:
+${mappedChunks.join('\n\n---\n\n')}
+
+Based on ALL the above information, create a COMPREHENSIVE summary with these sections:
+
+# DETAILED MEETING SUMMARY
+
+## 1. MEETING OVERVIEW
+- Purpose and context
+- Participants (all people mentioned)
+- Key themes
+
+## 2. COMPLETE TOPIC BREAKDOWN
+For each topic discussed (in chronological order):
+- **Topic Name**
+  - What was discussed
+  - Who participated
+  - Key points made
+  - Decisions reached
+  - Issues raised
+  - Solutions proposed
+
+## 3. ALL DECISIONS MADE
+List every decision with:
+- The decision
+- Who made it
+- Reasoning/context
+- Impact/implications
+
+## 4. COMPREHENSIVE ACTION ITEMS
+For each action item:
+- Task description
+- Assigned to
+- Deadline/timeline
+- Dependencies
+- Context/reason
+
+## 5. TOOLS & SYSTEMS DISCUSSED
+For each tool/platform mentioned:
+- Name (e.g., Ninja, Halo, PSA, Notion, Connectwise)
+- How it's being used
+- Issues/concerns
+- Integration points
+- Recommendations made
+
+## 6. TECHNICAL SPECIFICATIONS
+- All technical details mentioned
+- Configurations discussed
+- Implementation specifics
+- Security considerations
+
+## 7. PROBLEMS & SOLUTIONS
+- Each problem/issue raised
+- Proposed solutions
+- Decisions on how to proceed
+- Unresolved issues
+
+## 8. KEY INSIGHTS & QUOTES
+- Important realizations
+- Memorable quotes
+- Critical observations
+
+## 9. NEXT STEPS & FOLLOW-UPS
+- Immediate next steps
+- Future meetings planned
+- Items requiring follow-up
+- Open questions
+
+Be EXHAUSTIVE. Include every meaningful detail. Someone reading this summary should understand everything that was discussed as if they attended the meeting.
+
+COMPREHENSIVE SUMMARY:`;
+
+  const response = await axios.post(`${host}/api/generate`, {
+    model: model,
+    prompt: prompt,
+    stream: false,
+    options: {
+      temperature: 0.2,
+      num_predict: 6000  // Very high limit for comprehensive summary
+    }
+  });
+
+  return response.data.response;
+}
+
 async function summarizeWithOllama(
   transcript: string,
   host: string,
@@ -572,54 +805,47 @@ async function summarizeWithOllama(
       await pullOllamaModel(host, model);
     }
     
-    let prompt = `You are an expert content analyst creating a comprehensive summary of video content. Your summary should be detailed, well-structured, and capture all important information.`;
+    // Use map-reduce for better summarization
+    const MAX_CHUNK_SIZE = 3000; // characters per chunk
+    const chunks: string[] = [];
     
-    // If frame summaries are provided, include them in the prompt
-    if (frameSummaries && frameSummaries.length > 0) {
-      prompt += `\n\nThe following are timestamped descriptions of frames extracted from the video at key moments:\n\n`;
-      frameSummaries.forEach((summary) => {
-        prompt += `${summary}\n\n`;
-      });
-      prompt += `\n\nBased on the transcript and visual content above, create a comprehensive summary that includes:
-
-1. **Overview**: A brief introduction to what the video is about
-2. **Main Topics Covered**: List and explain the key topics discussed, in the order they appear
-3. **Key Points & Insights**: Important takeaways, findings, or conclusions
-4. **Visual Elements**: Notable visual content shown (based on frame descriptions)
-5. **Action Items or Next Steps**: Any recommendations, tasks, or follow-ups mentioned
-
-Please ensure the summary captures the progression of ideas and how visual elements support the spoken content.
-
-Transcript:\n${transcript}`;
-    } else {
-      prompt += `\n\nBased on the transcript below, create a comprehensive summary that includes:
-
-1. **Overview**: A brief introduction to what the content is about
-2. **Main Topics Covered**: List and explain the key topics discussed, in the order they appear
-3. **Key Points & Insights**: Important takeaways, findings, or conclusions
-4. **Action Items or Next Steps**: Any recommendations, tasks, or follow-ups mentioned
-
-Please ensure the summary captures the progression of ideas throughout the content.
-
-Transcript:\n${transcript}`;
+    // Split transcript into chunks at sentence boundaries
+    const sentences = transcript.match(/[^.!?]+[.!?]+/g) || [transcript];
+    let currentChunk = '';
+    
+    for (const sentence of sentences) {
+      if (currentChunk.length + sentence.length > MAX_CHUNK_SIZE && currentChunk.length > 0) {
+        chunks.push(currentChunk.trim());
+        currentChunk = sentence;
+      } else {
+        currentChunk += sentence;
+      }
     }
     
-    // Use the regular generate API
-    const response = await axios.post(`${host}/api/generate`, {
-      model: model,
-      prompt: `${prompt}\n\nComprehensive Summary:`,
-      stream: false,
-      options: {
-        temperature: 0.7,
-        num_predict: 2000  // Increased for more detailed summaries
-      }
-    }, {
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+    if (currentChunk.trim()) {
+      chunks.push(currentChunk.trim());
+    }
     
-    return response.data.response;
+    // If transcript is short enough, process as single chunk
+    if (chunks.length === 1) {
+      console.log(chalk.gray('Processing transcript...'));
+      const mapped = await mapChunk(transcript, 1, 1, host, model);
+      return await reduceChunks([mapped], transcript, host, model, frameSummaries);
+    }
+    
+    console.log(chalk.gray(`Using map-reduce strategy with ${chunks.length} chunks...`));
+    
+    // Map phase: Extract information from each chunk
+    const mappedChunks: string[] = [];
+    for (let i = 0; i < chunks.length; i++) {
+      console.log(chalk.gray(`  MAP: Processing chunk ${i + 1}/${chunks.length}...`));
+      const mapped = await mapChunk(chunks[i], i + 1, chunks.length, host, model);
+      mappedChunks.push(mapped);
+    }
+    
+    // Reduce phase: Combine all mapped information
+    console.log(chalk.gray('  REDUCE: Synthesizing final summary...'));
+    return await reduceChunks(mappedChunks, transcript, host, model, frameSummaries);
   } catch (error) {
     if (axios.isAxiosError(error)) {
       if (error.code === 'ECONNREFUSED') {
