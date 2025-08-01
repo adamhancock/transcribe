@@ -4,10 +4,36 @@ import { spawn } from 'child_process';
 import axios from 'axios';
 import { $ } from 'zx';
 import chalk from 'chalk';
+import os from 'os';
+import crypto from 'crypto';
 
 // Configure zx to be quiet
 $.verbose = false;
 $.quiet = true;
+
+// Temp directory management
+let tempDirPath: string | null = null;
+
+export async function getTempDir(): Promise<string> {
+  if (!tempDirPath) {
+    const baseTempDir = os.tmpdir();
+    const sessionId = crypto.randomBytes(8).toString('hex');
+    tempDirPath = path.join(baseTempDir, 'transcribe', sessionId);
+    await fs.mkdir(tempDirPath, { recursive: true });
+  }
+  return tempDirPath;
+}
+
+export async function cleanupTempDir(): Promise<void> {
+  if (tempDirPath) {
+    try {
+      await fs.rm(tempDirPath, { recursive: true, force: true });
+      tempDirPath = null;
+    } catch (error) {
+      console.error(chalk.yellow(`Warning: Failed to cleanup temp directory: ${error}`));
+    }
+  }
+}
 
 export interface FrameInfo {
   path: string;
@@ -27,7 +53,9 @@ export interface TimestampedTranscript {
 }
 
 export async function extractAudio(inputPath: string): Promise<string> {
-  const outputPath = inputPath.replace(/\.[^/.]+$/, '.wav');
+  const tempDir = await getTempDir();
+  const inputBasename = path.basename(inputPath, path.extname(inputPath));
+  const outputPath = path.join(tempDir, `${inputBasename}.wav`);
   
   try {
     // Use ffmpeg to extract audio as WAV with proper format for Whisper
@@ -43,7 +71,9 @@ export async function extractFrames(
   interval: number = 3,
   maxFrames: number = 30
 ): Promise<FrameInfo[]> {
-  const frameDir = inputPath.replace(/\.[^/.]+$/, '_frames');
+  const tempDir = await getTempDir();
+  const inputBasename = path.basename(inputPath, path.extname(inputPath));
+  const frameDir = path.join(tempDir, `${inputBasename}_frames`);
   
   // Create frames directory
   await fs.mkdir(frameDir, { recursive: true });
@@ -78,7 +108,9 @@ export async function extractFramesAtTimestamps(
   inputPath: string,
   keyMoments: KeyMoment[]
 ): Promise<FrameInfo[]> {
-  const frameDir = inputPath.replace(/\.[^/.]+$/, '_frames');
+  const tempDir = await getTempDir();
+  const inputBasename = path.basename(inputPath, path.extname(inputPath));
+  const frameDir = path.join(tempDir, `${inputBasename}_frames`);
   
   // Create frames directory
   await fs.mkdir(frameDir, { recursive: true });
@@ -136,12 +168,13 @@ export async function transcribeAudio(audioPath: string, model: string = 'base')
     throw new Error('Whisper is not installed. Please install it with: pip install openai-whisper');
   }
   
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
+    const tempDir = await getTempDir();
     const whisperProcess = spawn('whisper', [
       audioPath,
       '--model', model,
       '--output_format', 'json',
-      '--output_dir', path.dirname(audioPath),
+      '--output_dir', tempDir,
       '--language', 'en',
       '--fp16', 'False'
     ]);
@@ -159,7 +192,8 @@ export async function transcribeAudio(audioPath: string, model: string = 'base')
       }
       
       // Read the generated transcript with timestamps
-      const jsonPath = audioPath.replace(/\.[^/.]+$/, '.json');
+      const audioBasename = path.basename(audioPath, path.extname(audioPath));
+      const jsonPath = path.join(tempDir, `${audioBasename}.json`);
       try {
         const jsonContent = await fs.readFile(jsonPath, 'utf-8');
         const whisperOutput = JSON.parse(jsonContent);

@@ -2,9 +2,10 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
-import { extractAudio, extractFrames, extractFramesAtTimestamps, transcribeAudio, summarizeTranscript, summarizeFrame, getRelevantTranscriptForFrame, identifyKeyMoments, parseVTT } from './lib/processor.js';
+import { extractAudio, extractFrames, extractFramesAtTimestamps, transcribeAudio, summarizeTranscript, summarizeFrame, getRelevantTranscriptForFrame, identifyKeyMoments, parseVTT, cleanupTempDir } from './lib/processor.js';
 import type { FrameInfo, TimestampedTranscript, KeyMoment } from './lib/processor.js';
 import fs from 'fs/promises';
+import path from 'path';
 import { $ } from 'zx';
 
 // Configure zx to be quiet
@@ -238,20 +239,35 @@ program
         console.log(chalk.green(`Timestamped data saved to: ${timestampPath}`));
       }
       
-      // Clean up audio file if not keeping it
-      if (!options.keepAudio && audioPath) {
-        await fs.unlink(audioPath);
+      // Copy audio file if keeping it
+      if (options.keepAudio && audioPath) {
+        const audioDestPath = primaryInput.replace(/\.[^/.]+$/, '.wav');
+        await fs.copyFile(audioPath, audioDestPath);
+        console.log(chalk.green(`Audio saved to: ${audioDestPath}`));
       }
       
-      // Clean up frames if not keeping them
-      if (frameInfos.length > 0 && !options.keepFrames && videoPath) {
-        const frameDir = videoPath.replace(/\.[^/.]+$/, '_frames');
-        await fs.rm(frameDir, { recursive: true, force: true });
+      // Copy frames if keeping them
+      if (frameInfos.length > 0 && options.keepFrames) {
+        const framesDestDir = primaryInput.replace(/\.[^/.]+$/, '_frames');
+        await fs.mkdir(framesDestDir, { recursive: true });
+        
+        for (const frameInfo of frameInfos) {
+          const destPath = path.join(framesDestDir, path.basename(frameInfo.path));
+          await fs.copyFile(frameInfo.path, destPath);
+        }
+        console.log(chalk.green(`Frames saved to: ${framesDestDir}`));
       }
+      
+      // Clean up temporary directory
+      await cleanupTempDir();
       
     } catch (error) {
       spinner.fail('Error processing file');
       console.error(chalk.red(error instanceof Error ? error.message : String(error)));
+      
+      // Ensure cleanup even on error
+      await cleanupTempDir();
+      
       process.exit(1);
     }
   });
